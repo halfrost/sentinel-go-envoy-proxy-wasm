@@ -107,11 +107,6 @@ func (ctx *tcpContext) OnStreamDone() {
 	// tcp connection done
 }
 
-type httpContext struct {
-	types.DefaultHttpContext
-	contextID uint32
-}
-
 func incrementData() (uint64, error) {
 	value, cas, err := proxywasm.GetSharedData("shared_data_key")
 	if err != nil {
