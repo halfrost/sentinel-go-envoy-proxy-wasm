@@ -1,16 +1,16 @@
 package main
 
 import (
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
+	"strconv"
 
 	// sentinel "sentinel-go-envoy-proxy-wasm/api"
-	// "sentinel-go-envoy-proxy-wasm/core/base"
 	// "sentinel-go-envoy-proxy-wasm/core/config"
 	// "sentinel-go-envoy-proxy-wasm/core/flow"
 	// "sentinel-go-envoy-proxy-wasm/logging"
+	"time"
 
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
@@ -25,39 +25,11 @@ type vmContext struct {
 	contextID uint32
 }
 
-// Override types.DefaultVMContext.
 func (*vmContext) NewPluginContext(contextID uint32) types.PluginContext {
 	return &pluginContext{contextID: contextID}
 }
 
-// Override types.VMContext.
 func (*vmContext) OnVMStart(vmConfigurationSize int) types.OnVMStartStatus {
-	// conf := config.NewDefaultConfig()
-	// conf.Sentinel.Log.Logger = logging.NewConsoleLogger()
-	// err := sentinel.InitWithConfig(conf)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-
-	// _, err = flow.LoadRules([]*flow.Rule{
-	// 	{
-	// 		Resource:               "test-flow-qps-resource",
-	// 		TokenCalculateStrategy: flow.Direct,
-	// 		ControlBehavior:        flow.Reject,
-	// 		Threshold:              1,
-	// 		StatIntervalInMs:       1000,
-	// 	},
-	// })
-
-	// if err != nil {
-	// 	log.Fatalf("Unexpected error: %+v", err)
-	// }
-
-	// initialValueBuf := make([]byte, 8)
-	// binary.LittleEndian.PutUint64(initialValueBuf, sharedDataInitialValue)
-	// if err := proxywasm.SetSharedData(sharedDataKey, initialValueBuf, 0); err != nil {
-	// 	proxywasm.LogWarnf("error setting shared data on OnVMStart: %v", err)
-	// }
 	return types.OnVMStartStatusOK
 }
 
@@ -66,27 +38,40 @@ type pluginContext struct {
 	contextID uint32
 }
 
-// Override types.DefaultPluginContext.
-// func (*pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
-// 	return &httpHeaders{contextID: time.Now().UnixNano()}
-// }
-
-// Override types.DefaultPluginContext.
 func (*pluginContext) NewTcpContext(contextID uint32) types.TcpContext {
 	return &tcpContext{contextID: time.Now().UnixNano()}
 }
 
 func (*pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
-	// go func() {
-	// 	for {
-	// 		_, b := sentinel.Entry("test-flow-qps-resource", sentinel.WithTrafficType(base.Inbound))
-	// 		if b != nil {
-	// 			incrementData()
-	// 		} else {
-	// 			resetData()
-	// 		}
-	// 	}
-	// }()
+	data, err := proxywasm.GetPluginConfiguration()
+	if err != nil {
+		proxywasm.LogCriticalf("error reading plugin configuration: %v", err)
+	}
+
+	proxywasm.LogInfof("plugin config: %s", string(data))
+	plugConfig := map[string]string{}
+	json.Unmarshal([]byte(data), &plugConfig)
+	// proxywasm.LogInfof("plugin configmap: %v", plugConfig["resource_name"])
+
+	// conf := config.NewDefaultConfig()
+	// conf.Sentinel.Log.Logger = logging.NewConsoleLogger()
+	// err = sentinel.InitWithConfig(conf)
+	// if err != nil {
+	// 	proxywasm.LogCritical(err.Error())
+	// }
+	// _, err = flow.LoadRules([]*flow.Rule{
+	// 	{
+	// 		Resource:               plugConfig["resource_name"],
+	// 		TokenCalculateStrategy: flow.Direct,
+	// 		ControlBehavior:        flow.Reject,
+	// 		Threshold:              1,
+	// 		StatIntervalInMs:       1000,
+	// 	},
+	// })
+
+	// if err != nil {
+	// 	proxywasm.LogCritical(err.Error())
+	// }
 	return types.OnPluginStartStatusOK
 }
 
@@ -98,19 +83,40 @@ type tcpContext struct {
 func (ctx *tcpContext) OnNewConnection() types.Action {
 	// tcp connection begin
 	proxywasm.LogInfo("OnNewConnection")
-	// value, _, err := proxywasm.GetSharedData("shared_data_key")
+	initialValueBuf := make([]byte, 8)
+	if err := proxywasm.SetSharedData(strconv.FormatInt(ctx.contextID, 10), initialValueBuf, 0); err != nil {
+		proxywasm.LogInfof("error setting shared data on OnHttpRequestHeaders: %v", err)
+	}
+
+	// data, err := proxywasm.GetPluginConfiguration()
 	// if err != nil {
-	// 	proxywasm.LogWarnf("error getting shared data on OnNewConnection: %v", err)
+	// 	proxywasm.LogCriticalf("error reading plugin configuration: %v", err)
 	// }
-	// if binary.LittleEndian.Uint64(value) > 0 {
-	// 	return types.ActionPause
-	// }
+
+	// proxywasm.LogInfof("plugin config: %v", string(data))
+	// plugConfig := map[string]string{}
+	// json.Unmarshal([]byte(data), &plugConfig)
+	// proxywasm.LogInfof("plugin configmap: %v", plugConfig["resource_name"])
+
+	err := setKeyValue(strconv.FormatInt(ctx.contextID, 10), "gooooood")
+	proxywasm.LogInfof("setData err=%v", err)
+
+	// go func() {
+	// 	for {
+	// 		_, b := sentinel.Entry(plugConfig["resource_name"], sentinel.WithTrafficType(base.Inbound))
+	// 		if b != nil {
+	// 			setData()
+	// 		} else {
+
+	// 		}
+	// 	}
+	// }()
 	return types.ActionContinue
 }
 
 func (ctx *tcpContext) OnStreamDone() {
 	proxywasm.LogInfo("OnStreamDone")
-	// tcp connection done
+	// tcp connection done, the last one
 }
 
 // Override types.DefaultTcpContext.
@@ -126,7 +132,8 @@ func (ctx *tcpContext) OnDownstreamData(dataSize int, endOfStream bool) types.Ac
 	}
 
 	proxywasm.LogInfof(">>>>>> downstream data received >>>>>>\n%s", string(data))
-	// proxywasm.CloseDownstream()
+	str, er := getKeyValue(strconv.FormatInt(ctx.contextID, 10))
+	proxywasm.LogInfof("------------key = %v str = %v err = %v\n", strconv.FormatInt(ctx.contextID, 10), str, er)
 	return types.ActionContinue
 }
 
@@ -155,8 +162,8 @@ func (ctx *tcpContext) OnUpstreamData(dataSize int, endOfStream bool) types.Acti
 		proxywasm.LogCritical(err.Error())
 	}
 
-	length := 13
-	responseData := fmt.Sprintf("HTTP/1.1 429 Too Many Requests\r\ncontent-length: %v\r\ncontent-type: text/plain\r\ndate: %v\r\nserver: envoy\r\n\r\nXXXXXXXXXXXXX", length, time.Now().Format(http.TimeFormat))
+	length := 14
+	responseData := fmt.Sprintf("HTTP/1.1 429 Too Many Requests\r\ncontent-length: %v\r\ncontent-type: text/plain\r\ndate: %v\r\nserver: envoy\r\n\r\nXXXXXXXXXXXXX\n", length, time.Now().Format(http.TimeFormat))
 
 	proxywasm.ReplaceUpstreamData([]byte(responseData))
 	proxywasm.LogInfof("<<<<<< upstream data received <<<<<<\n%v\n%v", string(responseData), string(data))
@@ -169,37 +176,27 @@ func (ctx *tcpContext) OnUpstreamClose(t types.PeerType) {
 	return
 }
 
-func incrementData() (uint64, error) {
-	value, cas, err := proxywasm.GetSharedData("shared_data_key")
+func setKeyValue(key, value string) error {
+	_, cas, err := proxywasm.GetSharedData(key)
 	if err != nil {
 		proxywasm.LogWarnf("error getting shared data on OnHttpRequestHeaders: %v", err)
-		return 0, err
 	}
 
-	buf := make([]byte, 8)
-	ret := binary.LittleEndian.Uint64(value) + 1
-	binary.LittleEndian.PutUint64(buf, ret)
-	if err := proxywasm.SetSharedData("threshold", buf, cas); err != nil {
+	if err := proxywasm.SetSharedData(key, []byte(value), cas); err != nil {
 		proxywasm.LogWarnf("error setting shared data on OnHttpRequestHeaders: %v", err)
-		return 0, err
+		return err
 	}
-	return ret, err
+	return nil
 }
 
-func resetData() (uint64, error) {
-	_, cas, err := proxywasm.GetSharedData("threshold")
+func getKeyValue(key string) (string, error) {
+	value, _, err := proxywasm.GetSharedData(key)
 	if err != nil {
 		proxywasm.LogWarnf("error getting shared data on OnHttpRequestHeaders: %v", err)
-		return 0, err
+		return "", err
 	}
 
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, 0)
-	if err := proxywasm.SetSharedData("threshold", buf, cas); err != nil {
-		proxywasm.LogWarnf("error setting shared data on OnHttpRequestHeaders: %v", err)
-		return 0, err
-	}
-	return 0, err
+	return string(value), err
 }
 
 type httpHeaders struct {
