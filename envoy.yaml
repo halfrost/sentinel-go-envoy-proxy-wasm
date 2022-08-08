@@ -1,55 +1,3 @@
-bootstrap_extensions:
-- name: envoy.bootstrap.wasm
-  typed_config:
-    "@type": type.googleapis.com/envoy.extensions.wasm.v3.WasmService
-    singleton: true
-    config:
-      # Used as a queue name
-      configuration:
-        "@type": type.googleapis.com/google.protobuf.StringValue
-        value: "http_request_headers"
-      # Use the same vm_config as below, so we can reuse the same VM for multiple queues.
-      vm_config:
-        vm_id: "receiver"
-        runtime: "envoy.wasm.runtime.v8"
-        code:
-          local:
-            filename: "main.wasm"
-
-- name: envoy.bootstrap.wasm
-  typed_config:
-    "@type": type.googleapis.com/envoy.extensions.wasm.v3.WasmService
-    singleton: true
-    config:
-      # Used as a queue name
-      configuration:
-        "@type": type.googleapis.com/google.protobuf.StringValue
-        value: "http_response_headers"
-      # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
-      vm_config:
-        vm_id: "receiver"
-        runtime: "envoy.wasm.runtime.v8"
-        code:
-          local:
-            filename: "main.wasm"
-
-- name: envoy.bootstrap.wasm
-  typed_config:
-    "@type": type.googleapis.com/envoy.extensions.wasm.v3.WasmService
-    singleton: true
-    config:
-      configuration:
-        # Used as a queue name
-        "@type": type.googleapis.com/google.protobuf.StringValue
-        value: "tcp_data_hashes"
-      # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
-      vm_config:
-        vm_id: "receiver"
-        runtime: "envoy.wasm.runtime.v8"
-        code:
-          local:
-            filename: "main.wasm"
-
 static_resources:
   listeners:
     - name: http
@@ -66,17 +14,6 @@ static_resources:
                 codec_type: auto
                 route_config:
                   name: local_route
-                  virtual_hosts:
-                    - name: local_service
-                      domains:
-                        - "*"
-                      routes:
-                        - match:
-                            prefix: "/"
-                          direct_response:
-                            status: 200
-                            body:
-                              inline_string: "example body\n"
                 http_filters:
                   - name: envoy.filters.http.wasm
                     typed_config:
@@ -85,7 +22,10 @@ static_resources:
                         # Instruct that the PluginContext should behave as a Http filter.
                         configuration:
                           "@type": type.googleapis.com/google.protobuf.StringValue
-                          value: "http"
+                          value: |
+                            {
+                              "config_path": "./sentinel.yml"
+                            }
                         # Use the same vm_config as below, so we can reuse the same VM for multiple queues.
                         vm_config:
                           vm_id: "sender"
@@ -111,7 +51,10 @@ static_resources:
                   # Instruct that the PluginContext should behave as a Tcp filter.
                   configuration:
                     "@type": type.googleapis.com/google.protobuf.StringValue
-                    value: "tcp"
+                    value: |
+                      {
+                        "config_path": "./sentinel.yml"
+                      }
                   # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
                   vm_config:
                     vm_id: "sender"
@@ -125,20 +68,6 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
                 stat_prefix: ingress
                 cluster: admin
-  clusters:
-    - name: admin
-      connect_timeout: 5000s
-      type: strict_dns
-      lb_policy: round_robin
-      load_assignment:
-        cluster_name: admin
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: 0.0.0.0
-                      port_value: 8001
 
 admin:
   access_log_path: "/dev/null"
