@@ -49,11 +49,11 @@ Sentinel Go Proxy-WASM extension
 
 鉴于 tinygo 的限制，不能完美支持 cgo。这意味着我不能使用 etcd 和 prometheus 相关功能。因为它们俩会依赖 xxhash。xxhash 需要 cgo 编译。于是我注释掉 etcd 和 prometheus 以及它们关联的依赖。注掉以后，再编译确实可以通过。但是 sentinel 会出 bug。调试以后发现，在 exporter/metric/prometheus/exporter.go:20:2 这一行中，如果没有 prometheus client 依赖包，metric 是 0，这会导致 sentinel 底层统计计数一部分为 0，这会直接导致 sentinel 永远不会触发流控逻辑。我这两天一直在折腾这部分，还是没调试出来。如果有 sentinel-golang 开发同学，我很想问问他，如果移除 prometheus，有什么办法能 workaround。这部分我暂时想不到其他方法可以绕开。
 
-在 wasm plugin 中，常见的统计计数都很容易实现，但是涉及到 prometheus 中一些底层的 metric，目前会受到 tinygo 的限制，导致编译错误。我在 Stack Overflow，github 上也寻找过解决方案，看了一些比较复杂的 wasm plugin，tinygo 的版本还没有人写出来和 prometheus 有关的功能。关于 cgo 的问题，已经提 issue 给 tinygo 团队了。他们目前正在修复中，issue 在这里：https://github.com/tinygo-org/tinygo/issues/3044
+在 wasm plugin 中，常见的统计计数都很容易实现，但是涉及到 prometheus 中一些底层的 metric，目前会受到 tinygo 的限制，导致编译错误。我在 Stack Overflow，github 上也寻找过解决方案，看了一些比较复杂的 wasm plugin，tinygo 的版本还没有人写出来和 prometheus 有关的功能。关于 cgo 的问题，已经提 issue 给 tinygo 团队了。他们目前正在修复中，issue 在这里：[https://github.com/tinygo-org/tinygo/issues/3044](https://github.com/tinygo-org/tinygo/issues/3044)
 
 ## 2. reflect 的问题
 
-除去 cgo 的问题，还有一些关于 reflect 的问题。可能你会好奇，哪里会用到 reflect？其实在读取 yaml 文件的时候就会用到。在 yaml 文件中用 map 传递一些值给 plugin，比如 resource name，crd path。这些是包在一个 json 中。tinygo 解析的时候，并不知道里面有哪些字段，它会以 interface{} 类型去解析。这就会用到 reflect 了。在现在的实现代码中写了读取 crd yaml 的代码了。但是实际运行会崩溃。错误和这个 issue 是一样的：https://github.com/tinygo-org/tinygo/issues/2660。这个问题有 workaround 的方法，即传值不要传递一个可变结构的 map。这样 tinygo 解析的时候不会用 interface 去序列化，也不会触发这个 reflect 的 bug。但是这个 bug 真的很常见。如果传一个 json 数据，就 panic 了。json 是一个可变结构的 map。
+除去 cgo 的问题，还有一些关于 reflect 的问题。可能你会好奇，哪里会用到 reflect？其实在读取 yaml 文件的时候就会用到。在 yaml 文件中用 map 传递一些值给 plugin，比如 resource name，crd path。这些是包在一个 json 中。tinygo 解析的时候，并不知道里面有哪些字段，它会以 interface{} 类型去解析。这就会用到 reflect 了。在现在的实现代码中写了读取 crd yaml 的代码了。但是实际运行会崩溃。错误和这个 issue 是一样的：[https://github.com/tinygo-org/tinygo/issues/2660](https://github.com/tinygo-org/tinygo/issues/2660)。这个问题有 workaround 的方法，即传值不要传递一个可变结构的 map。这样 tinygo 解析的时候不会用 interface 去序列化，也不会触发这个 reflect 的 bug。但是这个 bug 真的很常见。如果传一个 json 数据，就 panic 了。json 是一个可变结构的 map。
 
 # 当前进度
 
