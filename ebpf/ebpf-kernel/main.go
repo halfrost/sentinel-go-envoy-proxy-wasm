@@ -25,74 +25,42 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -type event bpf fentry.c -- -I../headers
 
 func main() {
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+	if len(os.Args) < 2 {
+		log.Fatalf("Please specify a network interface")
+	}
 
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatal(err)
+	ifaceName := os.Args[1]
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		log.Fatalf("lookup network iface %q: %s", ifaceName, err)
 	}
 
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		log.Fatalf("loading objects: %v", err)
+		log.Fatalf("loading objects: %s", err)
 	}
 	defer objs.Close()
 
-	link, err := link.AttachTracing(link.TracingOptions{
-		Program: objs.bpfPrograms.TcpConnect,
+	l, err := link.AttachXDP(link.XDPOptions{
+		Program:   objs.XdpProgFunc,
+		Interface: iface.Index,
 	})
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("could not attach XDP program: %s", err)
 	}
-	defer link.Close()
+	defer l.Close()
 
-	rd, err := ringbuf.NewReader(objs.bpfMaps.Events)
-	if err != nil {
-		log.Fatalf("opening ringbuf reader: %s", err)
-	}
-	defer rd.Close()
+	log.Printf("Attached XDP program to iface %q (index %d)", iface.Name, iface.Index)
 
-	go func() {
-		<-stopper
-
-		if err := rd.Close(); err != nil {
-			log.Fatalf("closing ringbuf reader: %s", err)
-		}
-	}()
-
-	log.Printf("%-16s %-15s %-6s -> %-15s %-6s",
-		"Comm",
-		"Src addr",
-		"Port",
-		"Dest addr",
-		"Port",
-	)
-
-	var event bpfEvent
-	for {
-		record, err := rd.Read()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s, err := formatMapContents(objs.XdpStatsMap)
 		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				log.Println("received signal, exiting..")
-				return
-			}
-			log.Printf("reading from reader: %s", err)
+			log.Printf("Error reading map: %s", err)
 			continue
 		}
-
-		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.BigEndian, &event); err != nil {
-			log.Printf("parsing ringbuf event: %s", err)
-			continue
-		}
-
-		log.Printf("%-16s %-15s %-6d -> %-15s %-6d",
-			event.Comm,
-			intToIP(event.Saddr),
-			event.Sport,
-			intToIP(event.Daddr),
-			event.Dport,
-		)
-		saveDataToMap(event.Dport, intToIP(event.Saddr), event.Sport)
+		log.Printf("Map contents:\n%s", s)
 	}
 }
 
@@ -158,4 +126,19 @@ func readMap(outerMapSpec ebpf.MapSpec) {
 		}
 		log.Printf("outerMapKey %d, innerMap.Info: %+v", outerMapKey, innerMapInfo.)
 	}
+}
+
+func formatMapContents(m *ebpf.Map) (string, error) {
+	var (
+		sb  strings.Builder
+		key []byte
+		val uint32
+	)
+	iter := m.Iterate()
+	for iter.Next(&key, &val) {
+		sourceIP := net.IP(key) // IPv4 source address in network byte order.
+		packetCount := val
+		sb.WriteString(fmt.Sprintf("\t%s => %d\n", sourceIP, packetCount))
+	}
+	return sb.String(), iter.Err()
 }

@@ -13,14 +13,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type bpfEvent struct {
-	Sport uint16
-	Dport uint16
-	Saddr uint32
-	Daddr uint32
-	Srtt  uint32
-}
-
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -36,9 +28,9 @@ func loadBpf() (*ebpf.CollectionSpec, error) {
 //
 // The following types are suitable as obj argument:
 //
-//     *bpfObjects
-//     *bpfPrograms
-//     *bpfMaps
+//	*bpfObjects
+//	*bpfPrograms
+//	*bpfMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
 func loadBpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
@@ -62,14 +54,14 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	TcpClose *ebpf.ProgramSpec `ebpf:"tcp_close"`
+	XdpProgFunc *ebpf.ProgramSpec `ebpf:"xdp_prog_func"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Events *ebpf.MapSpec `ebpf:"events"`
+	XdpStatsMap *ebpf.MapSpec `ebpf:"xdp_stats_map"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -91,12 +83,12 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
+	XdpStatsMap *ebpf.Map `ebpf:"xdp_stats_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
-		m.Events,
+		m.XdpStatsMap,
 	)
 }
 
@@ -104,12 +96,12 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	TcpClose *ebpf.Program `ebpf:"tcp_close"`
+	XdpProgFunc *ebpf.Program `ebpf:"xdp_prog_func"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
-		p.TcpClose,
+		p.XdpProgFunc,
 	)
 }
 
