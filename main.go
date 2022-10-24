@@ -2,20 +2,184 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
-
-	sentinel "sentinel-go-envoy-proxy-wasm/api"
-	"sentinel-go-envoy-proxy-wasm/core/base"
-	"sentinel-go-envoy-proxy-wasm/core/config"
-	"sentinel-go-envoy-proxy-wasm/core/flow"
-	"sentinel-go-envoy-proxy-wasm/logging"
 	"time"
 
+	sentinel "github.com/alibaba/sentinel-golang/api"
+	"github.com/alibaba/sentinel-golang/core/base"
+	"github.com/alibaba/sentinel-golang/core/circuitbreaker"
+	"github.com/alibaba/sentinel-golang/core/config"
+	"github.com/alibaba/sentinel-golang/core/flow"
+	"github.com/alibaba/sentinel-golang/core/hotspot"
+	"github.com/alibaba/sentinel-golang/core/isolation"
+	"github.com/alibaba/sentinel-golang/core/system"
+	"github.com/alibaba/sentinel-golang/logging"
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
+	"gopkg.in/yaml.v2"
 )
+
+type Metric int
+
+const (
+	RequestAmount Metric = iota
+	CpuPercentage
+)
+
+type Mode int
+
+const (
+	Global Mode = iota
+	Local
+)
+
+type Strategy int
+
+const (
+	SlowRequestRatio Strategy = iota
+	ErrorRatio
+	ErrorCount
+	BBR
+)
+
+var (
+	strategyMap = map[string]circuitbreaker.Strategy{
+		"SlowRequestRatio": circuitbreaker.SlowRequestRatio,
+		"ErrorRatio":       circuitbreaker.ErrorRatio,
+		"ErrorCount":       circuitbreaker.ErrorCount,
+	}
+	modeMap = map[string]Mode{
+		"Global": Global,
+		"Local":  Local,
+	}
+	metricMap = map[string]hotspot.MetricType{
+		"Concurrency": hotspot.Concurrency,
+		"QPS":         hotspot.Concurrency,
+	}
+	tokenCalculateStrategyMap = map[string]flow.TokenCalculateStrategy{
+		"Direct":         flow.Direct,
+		"WarmUp":         flow.WarmUp,
+		"MemoryAdaptive": flow.MemoryAdaptive,
+	}
+	controlBehaviorMap = map[string]flow.ControlBehavior{
+		"Reject":     flow.Reject,
+		"Throttling": flow.Throttling,
+	}
+	relationStrategyMap = map[string]flow.RelationStrategy{
+		"CurrentResource":    flow.CurrentResource,
+		"AssociatedResource": flow.AssociatedResource,
+	}
+	adaptiveStrategyMap = map[string]system.AdaptiveStrategy{
+		"none": system.NoAdaptive,
+		"bbr":  system.BBR,
+	}
+	systemMetricMap = map[string]system.MetricType{
+		"load":        system.Load,
+		"avgRT":       system.AvgRT,
+		"concurrency": system.Concurrency,
+		"inboundQPS":  system.InboundQPS,
+		"cpuUsage":    system.CpuUsage,
+	}
+)
+
+type Kind int
+
+const (
+	RateLimitStrategy                  Kind = 0
+	ThrottlingStrategy                 Kind = 1
+	ConcurrencyLimitStrategy           Kind = 2
+	CircuitBreakerStrategy             Kind = 3
+	AdaptiveOverloadProtectionStrategy Kind = 4
+)
+
+type Pair struct {
+	Key   string `yaml:"key"`
+	Value string `yaml:"value"`
+}
+
+type Conf struct {
+	Apiversion string `yaml:"apiVersion"`
+	KindType   string `yaml:"kind"`
+	Metadata   struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+	Spec struct {
+		Behavior     string `yaml:"behavior"`
+		BehaviorDesc struct {
+			ResponseStatusCode        int    `yaml:"responseStatusCode"`
+			ResponseContentBody       string `yaml:"responseContentBody"`
+			ResponseAdditionalHeaders []Pair `yaml:"responseAdditionalHeaders"`
+		} `yaml:"behaviorDesc"`
+		MetricType                   string                `yaml:"metricType"`
+		LimitMode                    string                `yaml:"limitMode"`
+		Threshold                    float64               `yaml:"threshold"`
+		StatDuration                 uint32                `yaml:"statDuration"`          // unit is second
+		MinIntervalOfRequests        uint32                `yaml:"minIntervalOfRequests"` // unit is millisecond
+		QueueTimeout                 uint32                `yaml:"queueTimeout"`          // unit is millisecond
+		RecoveryTimeout              uint32                `yaml:"recoveryTimeout"`       // unit is second
+		RetryTimeoutMs               uint32                `yaml:"retryTimeoutMs"`        // unit is millisecond
+		StatIntervalMs               uint32                `yaml:"statIntervalMs"`        // unit is millisecond
+		MaxConcurrency               uint32                `yaml:"maxConcurrency"`
+		StrategyType                 string                `yaml:"strategy"`
+		TriggerRatio                 float64               `yaml:"triggerRatio"`
+		MinRequestAmount             uint64                `yaml:"minRequestAmount"`
+		TriggerThreshold             float64               `yaml:"triggerThreshold"`
+		AdaptiveStrategy             string                `yaml:"adaptiveStrategy"`
+		StatSlidingWindowBucketCount uint32                `yaml:"statSlidingWindowBucketCount"`
+		MaxAllowedRtMs               uint64                `yaml:"maxAllowedRtMs"`
+		ProbeNum                     uint64                `yaml:"probeNum"`
+		TokenCalculateStrategy       string                `yaml:"tokenCalculateStrategy"`
+		ControlBehavior              string                `yaml:"controlBehavior"`
+		RelationStrategy             string                `yaml:"relationStrategy"`
+		RefResource                  string                `yaml:"refResource"`
+		MaxQueueingTimeMs            uint32                `yaml:"maxQueueingTimeMs"`
+		WarmUpPeriodSec              uint32                `yaml:"warmUpPeriodSec"`
+		WarmUpColdFactor             uint32                `yaml:"warmUpColdFactor"`
+		StatIntervalInMs             uint32                `yaml:"statIntervalInMs"`
+		LowMemUsageThreshold         int64                 `yaml:"lowMemUsageThreshold"`
+		HighMemUsageThreshold        int64                 `yaml:"highMemUsageThreshold"`
+		MemLowWaterMarkBytes         int64                 `yaml:"memLowWaterMarkBytes"`
+		MemHighWaterMarkBytes        int64                 `yaml:"memHighWaterMarkBytes"`
+		ParamIndex                   int                   `yaml:"paramIndex"`
+		ParamKey                     string                `yaml:"paramKey"`
+		BurstCount                   int64                 `yaml:"burstCount"`
+		DurationInSec                int64                 `yaml:"durationInSec"`
+		ParamsMaxCapacity            int64                 `yaml:"paramsMaxCapacity"`
+		SpecificItems                map[interface{}]int64 `yaml:"specificItems"`
+		TriggerCount                 float64               `yaml:"triggerCount"`
+		Strategy                     string                `yaml:"strategy"`
+		SlowConditions               struct {
+			MaxAllowedRt int `yaml:"maxAllowedRt"` // unit is millisecond
+		} `yaml:"slowConditions"`
+	} `yaml:"spec"`
+}
+
+func readYaml(filename string) (*[]Conf, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(file)
+	confs, conf := []Conf{}, Conf{}
+	err = dec.Decode(&conf)
+	for err == nil {
+		confs = append(confs, conf)
+		fmt.Println(conf)
+		conf = Conf{}
+		err = dec.Decode(&conf)
+	}
+	if !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	fmt.Println("Parse yaml complete!")
+	return &confs, nil
+}
 
 func main() {
 	proxywasm.SetVMContext(&vmContext{})
@@ -56,22 +220,115 @@ func (*pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginS
 
 	conf := config.NewDefaultConfig()
 	conf.Sentinel.Log.Logger = logging.NewConsoleLogger()
+
 	err = sentinel.InitWithConfig(conf)
 	if err != nil {
 		proxywasm.LogCritical(err.Error())
 	}
-	_, err = flow.LoadRules([]*flow.Rule{
-		{
-			Resource:               plugConfig["resource_name"],
-			TokenCalculateStrategy: flow.Direct,
-			ControlBehavior:        flow.Reject,
-			Threshold:              1,
-			StatIntervalInMs:       1000,
-		},
-	})
 
+	confs, err := readYaml(plugConfig["config_path"])
 	if err != nil {
-		proxywasm.LogCritical(err.Error())
+		log.Fatal(err)
+	}
+	log.Printf("%v", confs)
+
+	flowRules, hotspotRules, circuitbreakerRules, isolationRules, systemRules := []*flow.Rule{}, []*hotspot.Rule{}, []*circuitbreaker.Rule{},
+		[]*isolation.Rule{}, []*system.Rule{}
+	for _, conf := range *confs {
+		switch conf.KindType {
+		case "RateLimitStrategy":
+			flowRules = append(flowRules, &flow.Rule{
+				Resource:               plugConfig["resource_name"],
+				TokenCalculateStrategy: tokenCalculateStrategyMap[conf.Spec.TokenCalculateStrategy],
+				ControlBehavior:        controlBehaviorMap[conf.Spec.ControlBehavior],
+				Threshold:              conf.Spec.Threshold,
+				StatIntervalInMs:       conf.Spec.StatIntervalMs,
+				RelationStrategy:       relationStrategyMap[conf.Spec.RelationStrategy],
+				RefResource:            conf.Spec.RefResource,
+				MaxQueueingTimeMs:      conf.Spec.MaxQueueingTimeMs,
+				WarmUpPeriodSec:        conf.Spec.WarmUpPeriodSec,
+				WarmUpColdFactor:       conf.Spec.WarmUpColdFactor,
+				LowMemUsageThreshold:   conf.Spec.LowMemUsageThreshold,
+				HighMemUsageThreshold:  conf.Spec.HighMemUsageThreshold,
+				MemLowWaterMarkBytes:   conf.Spec.MemLowWaterMarkBytes,
+				MemHighWaterMarkBytes:  conf.Spec.MemHighWaterMarkBytes,
+			})
+		case "ThrottlingStrategy":
+			hotspotRules = append(hotspotRules, &hotspot.Rule{
+				Resource:          plugConfig["resource_name"],
+				MetricType:        hotspot.QPS,
+				ControlBehavior:   hotspot.Throttling,
+				ParamIndex:        conf.Spec.ParamIndex,
+				ParamKey:          conf.Spec.ParamKey,
+				Threshold:         int64(conf.Spec.Threshold),
+				MaxQueueingTimeMs: int64(conf.Spec.MaxQueueingTimeMs),
+				BurstCount:        conf.Spec.BurstCount,
+				DurationInSec:     conf.Spec.DurationInSec,
+				ParamsMaxCapacity: conf.Spec.ParamsMaxCapacity,
+				SpecificItems:     conf.Spec.SpecificItems,
+			})
+		case "ConcurrencyLimitStrategy":
+			isolationRules = append(isolationRules, &isolation.Rule{
+				Resource:   plugConfig["resource_name"],
+				MetricType: isolation.Concurrency,
+				Threshold:  uint32(conf.Spec.Threshold),
+			})
+		case "CircuitBreakerStrategy":
+			circuitbreakerRules = append(circuitbreakerRules, &circuitbreaker.Rule{
+				Resource:                     plugConfig["resource_name"],
+				Strategy:                     strategyMap[conf.Spec.StrategyType],
+				RetryTimeoutMs:               conf.Spec.RetryTimeoutMs,
+				MinRequestAmount:             conf.Spec.MinRequestAmount,
+				StatIntervalMs:               conf.Spec.StatIntervalMs,
+				StatSlidingWindowBucketCount: conf.Spec.StatSlidingWindowBucketCount,
+				Threshold:                    conf.Spec.Threshold,
+				ProbeNum:                     conf.Spec.ProbeNum,
+				MaxAllowedRtMs:               conf.Spec.MaxAllowedRtMs,
+			})
+		case "AdaptiveOverloadProtectionStrategy":
+			systemRules = append(systemRules, &system.Rule{
+				MetricType:   systemMetricMap[conf.Spec.MetricType],
+				TriggerCount: conf.Spec.TriggerCount,
+				Strategy:     adaptiveStrategyMap[conf.Spec.AdaptiveStrategy],
+			})
+		case "HttpRequestFallbackAction":
+
+		}
+	}
+
+	if len(flowRules) > 0 {
+		_, err = flow.LoadRules(flowRules)
+		if err != nil {
+			proxywasm.LogCritical(err.Error())
+		}
+	}
+
+	if len(hotspotRules) > 0 {
+		_, err = hotspot.LoadRules(hotspotRules)
+		if err != nil {
+			proxywasm.LogCritical(err.Error())
+		}
+	}
+
+	if len(circuitbreakerRules) > 0 {
+		_, err = circuitbreaker.LoadRules(circuitbreakerRules)
+		if err != nil {
+			proxywasm.LogCritical(err.Error())
+		}
+	}
+
+	if len(isolationRules) > 0 {
+		_, err = isolation.LoadRules(isolationRules)
+		if err != nil {
+			proxywasm.LogCritical(err.Error())
+		}
+	}
+
+	if len(systemRules) > 0 {
+		_, err = system.LoadRules(systemRules)
+		if err != nil {
+			proxywasm.LogCritical(err.Error())
+		}
 	}
 	return types.OnPluginStartStatusOK
 }
