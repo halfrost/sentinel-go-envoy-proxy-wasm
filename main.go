@@ -86,6 +86,7 @@ var (
 		"inboundQPS":  system.InboundQPS,
 		"cpuUsage":    system.CpuUsage,
 	}
+	confs *[]Conf
 )
 
 type Kind int
@@ -226,7 +227,7 @@ func (*pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginS
 		proxywasm.LogCritical(err.Error())
 	}
 
-	confs, err := readYaml(plugConfig["config_path"])
+	confs, err = readYaml(plugConfig["config_path"])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -291,8 +292,6 @@ func (*pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginS
 				TriggerCount: conf.Spec.TriggerCount,
 				Strategy:     adaptiveStrategyMap[conf.Spec.AdaptiveStrategy],
 			})
-		case "HttpRequestFallbackAction":
-
 		}
 	}
 
@@ -413,7 +412,22 @@ func (ctx *tcpContext) OnUpstreamData(dataSize int, endOfStream bool) types.Acti
 	proxywasm.LogInfof("get BlockError = %v\n", blockErr)
 
 	if blockErr != "" {
-		responseData := fmt.Sprintf("HTTP/1.1 429 Too Many Requests\r\ncontent-length: %v\r\ncontent-type: text/plain\r\ndate: %v\r\nserver: envoy\r\n\r\n%v\n", len(blockErr)+1, time.Now().Format(http.TimeFormat), blockErr)
+		statusCode := 429
+		body, header := "", ""
+		for _, conf := range *confs {
+			switch conf.KindType {
+			case "HttpRequestFallbackAction":
+				if conf.Spec.BehaviorDesc.ResponseStatusCode != 0 {
+					statusCode = conf.Spec.BehaviorDesc.ResponseStatusCode
+				}
+				body = conf.Spec.BehaviorDesc.ResponseContentBody
+				for key, value := range conf.Spec.BehaviorDesc.ResponseAdditionalHeaders {
+					header += fmt.Sprintf("%v: %v\r\n", key, value)
+				}
+			}
+		}
+
+		responseData := fmt.Sprintf("HTTP/1.1 %v Too Many Requests\r\ncontent-length: %v\r\ncontent-type: text/plain\r\ndate: %v\r\nserver: envoy\r\n%v\r\n%v\n", statusCode, len(blockErr)+1, time.Now().Format(http.TimeFormat), header, body+" "+blockErr)
 		proxywasm.ReplaceUpstreamData([]byte(responseData))
 	}
 	return types.ActionContinue
