@@ -1,11 +1,57 @@
 # sentinel-go-envoy-proxy-wasm
 Sentinel Go Proxy-WASM extension
 
-# How to run this Envoy Wasm Extensions 
+
+# Introduction
+
+Due to the limitations of the sentinel token server for Envoy Global Rate Limiting Service model, scenarios and performance are limited. Considering the rapid development of cloud native in recent years, the voice of sentinel wasm extension in the community is getting higher and higher. Using the Envoy wasm extension and the native implementation of sentinel go, comprehensive traffic governance capabilities and standard coverage can be implemented.
+
+# Environment and Tools
+
+- tinygo 0.24.0 linux/amd64 (using go version go1.18.4 and LLVM version 14.0.0)
+- func-e 1.1.3
+- kubernetes/kubectl
+- Istio
+- Envoy
+
+# How it works
+
+The sentinel wasm extension implemented is based on the sentinel-go. So it uses proxy-wasm-go-sdk, which is an encapsulation of the Proxy-Wasm ABI, providing a series of APIs in the Go language. Using this SDK, it is possible to generate Wasm binaries that are compliant with the Proxy-Wasm.
+
+Before discussing the wasm architecture design, let’s talk about the Wasm Virtual Machine (Wasm VM). Wasm VM is the environment for loading plugins. In Envoy, VMs are created in each thread and isolated from each other. So the wasm extension program we created will be copied into the thread created by Envoy and loaded on each VM. The Proxy-Wasm allows multiple plugins in a single VM. In other words, a VM can be used by multiple plugins.
+
+
+![](./static/wasm_vm.png)
+
+From the vm loading timing, the thread first loads the vm, then the vm creates the context, and then loads the plugin context. The sentinel plugin is loaded by the vm. At this time, we can load some of the rule CRD specification yaml files we specified to perform the sentinel initialization operation. After the initial operation of sentinel plugin is completed, it starts to monitor http connection.
+
+![](./static/plugin.png)
+
+For each tcp connection, the plugin will intercept each upstream and downstream data packets. At this time, there are 5 hooks that can be executed. The entry is initialized when OnNewConnection is started, and the go statistical coroutine is started. Call the exit function at OnStreamDone and output a BlockError error message.
+
+If there are operations such as current limiting and fusing in the process, a BlockError will be catched in OnUpstreamData, and this error message will be returned to the client. Each connection will trigger entry funciton. If it exits normally, it will trigger exit function, and if the limit traffic rule is triggered, it will return BlockError.
+
+# Example
+
+## How to run test client
+
+The test client is used to control qps. That is, how many requests are requested per second.
+
+
+```go
+$ cd ./example
+$ go build
+$ ./client -q 100 -u some-test -p 8080
+```
+
+The client can receive 3 parameters, `q` is qps, the unit is per second, `u` is url path. `p` is port.
+
+
+## How to run this Envoy Wasm Extensions 
 
 We will be using [TinyGo](https://tinygo.org), [proxy-wasm-go-sdk](https://github.com/tetratelabs/proxy-wasm-go-sdk) and [func-e CLI](https://func-e.io) to build and test an Envoy Wasm extension. Then we'll show a way to configure the Wasm module using the EnvoyFilter resource and deploy it to Envoy sidecars in a Kubernetes cluster.
 
-## Installing func-e CLI
+### Installing func-e CLI
 
 Let's get started by downloading func-e CLI and installing it to `/usr/local/bin`:
 
@@ -20,7 +66,7 @@ $ func-e --version
 func-e version 1.1.3
 ```
 
-## Installing TinyGo
+### Installing TinyGo
 
 TinyGo powers the SDK we'll be using as Wasm doesn't support the official Go compiler. 
 
@@ -38,7 +84,7 @@ $ tinygo version
 tinygo version 0.24.0 linux/amd64 (using go version go1.18.4 and LLVM version 14.0.0)
 ```
 
-## Scaffolding the Wasm module
+### Scaffolding the Wasm module
 
 We'll start by creating a new folder for our extension, initializing the Go module, and downloading the SDK dependency:
 
@@ -85,7 +131,7 @@ static_resources:
                     value: |
                       {
                         "config_path": "./sentinel.yml",
-                        "resource_name": "http://localhost/"
+                        "resource_name": "some-test"
                       }
                   # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
                   vm_config:
@@ -179,7 +225,7 @@ The output shows the two log entries - one from the OnHttpRequestHeaders handler
 You can stop the proxy by bringing the process to the foreground with `fg` and pressing CTRL+C to stop it.
 
 
-## Deploying Wasm module to Istio using EnvoyFilter
+### Deploying Wasm module to Istio using EnvoyFilter
 
 The resource we can use to deploy a Wasm module to Istio is called the EnvoyFilter. EnvoyFilter gives us the ability to customize the Envoy configuration. It allows us to modify values, configure new listeners or clusters, and add filters.
 
@@ -408,14 +454,12 @@ Once you get the prompt to the curl container, send a request to the `httpbin` s
 < access-control-allow-origin: *
 < access-control-allow-credentials: true
 < x-envoy-upstream-service-time: 3
-< header_1: somevalue
-< header_2: secondvalue
 ...
 ```
 
-Notice the two headers we defined in the Wasm module are being set in the response.
+Then start the client with some configuration, we can begin testing.
 
-## Cleanup
+### Cleanup
 
 To delete all created resources from your cluster, run the following:
 
@@ -425,3 +469,21 @@ kubectl delete deployment httpbin
 kubectl delete svc httpbin
 kubectl delete sa httpbin
 ```
+
+# To be solved
+
+## 1. Tinygo has limitations
+
+Given the limitations of tinygo, cgo is not perfectly supported. This means that I cannot use etcd and prometheus related functions. Because both of them will depend on xxhash. xxhash requires cgo compile dependencies. So I commented out etcd and prometheus and their associated dependencies. After commenting out these code, recompiling can indeed pass. But sentinel will have bugs. After debugging, it is found that in the line of exporter/metric/prometheus/exporter.go:20:2, if without prometheus client dependency package, the metric is 0, which will cause part of the underlying statistical count of sentinel to be 0. The flow control logic will not be triggered.
+
+In the wasm plugin, common statistical counts are easy to implement, but it involves some low-level metrics in prometheus, which are currently limited by tinygo, resulting in compilation errors. I also looked for solutions on Stack Overflow and github, and saw some more complicated wasm plugins. The tinygo version has not yet written functions related to prometheus. Regarding the issue of cgo, an issue has been raised to the tinygo team. They are currently working on a fix, the issue is here: [https://github.com/tinygo-org/tinygo/issues/3044](https://github.com/tinygo-org/tinygo/issues/3044)
+
+## 2. Problems with reflect
+
+Apart from the cgo issue, there are some issues with reflect. You may be curious, where is reflect used? In fact, it will be used when reading yaml files. Use map to pass some values ​​to plugin in yaml file, such as resource name, crd path. These are wrapped in a json. When tinygo parses it, it doesn't know what fields are in it, it parses it with interface{} type. This part will use reflect package. In the current implementation code, the code for reading crd yaml is implemented. The bug is the same as this issue: [https://github.com/tinygo-org/tinygo/issues/2660](https://github.com/tinygo-org/tinygo/issues/2660). There is a workaround for this problem, that is, don't pass a map of mutable structures by value. In this way, tinygo will not use interface to serialize when parsing, and it will not trigger the reflect bug. But this bug is really common. If you pass a json data, it will panic. json is a map of mutable structures.
+
+
+# Next
+
+- Solved cgo compile problem.
+- Combine opensergo to refactor some module.

@@ -17,7 +17,7 @@ static_resources:
                     value: |
                       {
                         "config_path": "./sentinel.yml",
-                        "resource_name": "http://localhost/"
+                        "resource_name": "some-test"
                       }
                   # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
                   vm_config:
