@@ -1,45 +1,86 @@
 static_resources:
   listeners:
-    - name: main
+    - name: tcp
       address:
         socket_address:
           address: 0.0.0.0
-          port_value: 10000
+          port_value: 18000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.wasm
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
+                config:
+                  # Instruct that the PluginContext should behave as a Tcp filter.
+                  configuration:
+                    "@type": type.googleapis.com/google.protobuf.StringValue
+                    value: |
+                      {
+                        "config_path": "./sentinel.yml",
+                        "resource_name": "some-test"
+                      }
+                  # Use the same vm_config as above, so we can reuse the same VM for multiple queues.
+                  vm_config:
+                    vm_id: "sender"
+                    runtime: "envoy.wasm.runtime.v8"
+                    code:
+                      local:
+                        filename: "main.wasm"
+
+            - name: envoy.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: ingress
+                cluster: web_service
+
+    - name: http
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 8099
       filter_chains:
         - filters:
             - name: envoy.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: ingress_http
+                codec_type: auto
                 route_config:
                   name: local_route
                   virtual_hosts:
                     - name: local_service
-                      domains: ["*"]
+                      domains:
+                        - "*"
                       routes:
                         - match:
                             prefix: "/"
                           direct_response:
                             status: 200
                             body:
-                              inline_string: "Hello world"
+                              inline_string: "example body\n"
                 http_filters:
-                  - name: envoy.filters.http.wasm
-                    typed_config:
-                      "@type": type.googleapis.com/udpa.type.v1.TypedStruct
-                      type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
-                      value:
-                        config:
-                          vm_config:
-                            runtime: "envoy.wasm.runtime.v8"
-                            code:
-                              local:
-                                filename: "main.wasm"
                   - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: web_service
+      connect_timeout: 0.25s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: mock_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 8099
 
 admin:
   access_log_path: "/dev/null"
   address:
     socket_address:
       address: 0.0.0.0
-      port_value: 9901
+      port_value: 8001

@@ -1,0 +1,39 @@
+apiVersion: fault-tolerance.opensergo.io/v1alpha1
+kind: RateLimitStrategy
+metadata:
+  name: rate-limit-foo
+spec:
+  metricType: RequestAmount
+  limitMode: Global
+  threshold: 10
+  statDuration: "1s"
+---
+apiVersion: fault-tolerance.opensergo.io/v1alpha1
+kind: HttpRequestFallbackAction
+metadata:
+  name: fallback-foo
+spec:
+  behavior: ReturnProvidedResponse
+  behaviorDesc:
+    # 触发策略控制后，HTTP 请求返回 429 状态码，同时携带指定的内容和 header.
+    responseStatusCode: 429
+    responseContentBody: "Blocked by Sentinel"
+    responseAdditionalHeaders:
+      - key: X-Sentinel-Limit
+        value: "foo"
+---
+apiVersion: fault-tolerance.opensergo.io/v1alpha1
+kind: FaultToleranceRule
+metadata:
+  name: my-rule
+  namespace: prod
+  labels:
+    app: my-app 
+spec:
+  selector:
+    app: my-app # 规则配置生效的应用名
+  targets:
+    - targetResourceName: '/foo'
+  strategies: 
+    - name: rate-limit-foo
+  fallbackAction: fallback-foo
